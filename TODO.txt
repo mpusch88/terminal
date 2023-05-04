@@ -1,0 +1,15 @@
+I'd take a look at ControlAppearance.idl, and ControlProperties.h.
+
+	Move acrylic from CONTROL_SETTINGS to CONTROL_APPEARANCE_SETTINGS.
+
+	Add a CONTROL_SETTINGS for EnableUnfocusedAcrylic
+
+In MTSMSettings.h
+
+	add a new global boolean X(bool, EnableUnfocusedAcrylic, "comaptibility.enableUnfocusedAcrylic", true)
+
+	Similarly to above, move useAcrylic from MTSM_PROFILE_SETTINGS to MTSM_APPEARANCE_SETTINGS
+
+Use the global setting when constructing a TerminalSettings in TerminalSettings::_ApplyAppearanceSettings
+
+In TermControl.cpp, if EnableUnfocusedAcrylic is set, then switch the backdrop from acrylic.BackgroundSource(Media::AcrylicBackgroundSource::HostBackdrop); to Backdrop
