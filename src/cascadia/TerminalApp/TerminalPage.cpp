@@ -238,14 +238,10 @@ namespace winrt::TerminalApp::implementation
                 page->_OpenNewTerminalViaDropdown(NewTerminalArgs());
             }
         });
-        _newTabButton.Drop([weakThis{ get_weak() }](const Windows::Foundation::IInspectable&, winrt::Windows::UI::Xaml::DragEventArgs e) {
-            if (auto page{ weakThis.get() })
-            {
-                page->NewTerminalByDrop(e);
-            }
-        });
+        _newTabButton.Drop({ get_weak(), &TerminalPage::_NewTerminalByDrop });
         _tabView.SelectionChanged({ this, &TerminalPage::_OnTabSelectionChanged });
         _tabView.TabCloseRequested({ this, &TerminalPage::_OnTabCloseRequested });
+        _tabView.TabItemsChanged({ this, &TerminalPage::_OnTabItemsChanged });
 
         _tabView.TabDragStarting({ this, &TerminalPage::_onTabDragStarting });
         _tabView.TabStripDragOver({ this, &TerminalPage::_onTabStripDragOver });
@@ -401,35 +397,46 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    winrt::fire_and_forget TerminalPage::NewTerminalByDrop(winrt::Windows::UI::Xaml::DragEventArgs& e)
+    winrt::fire_and_forget TerminalPage::_NewTerminalByDrop(const Windows::Foundation::IInspectable&, winrt::Windows::UI::Xaml::DragEventArgs e)
+    try
     {
-        Windows::Foundation::Collections::IVectorView<Windows::Storage::IStorageItem> items;
-        try
+        const auto data = e.DataView();
+        if (!data.Contains(StandardDataFormats::StorageItems()))
         {
-            items = co_await e.DataView().GetStorageItemsAsync();
+            co_return;
         }
-        CATCH_LOG();
 
-        if (items.Size() == 1)
+        const auto weakThis = get_weak();
+        const auto items = co_await data.GetStorageItemsAsync();
+        const auto strongThis = weakThis.get();
+        if (!strongThis)
         {
-            std::filesystem::path path(items.GetAt(0).Path().c_str());
+            co_return;
+        }
+
+        TraceLoggingWrite(
+            g_hTerminalAppProvider,
+            "NewTabByDragDrop",
+            TraceLoggingDescription("Event emitted when the user drag&drops onto the new tab button"),
+            TraceLoggingKeyword(MICROSOFT_KEYWORD_MEASURES),
+            TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
+
+        for (const auto& item : items)
+        {
+            auto directory = item.Path();
+
+            std::filesystem::path path(std::wstring_view{ directory });
             if (!std::filesystem::is_directory(path))
             {
-                path = path.parent_path();
+                directory = winrt::hstring{ path.parent_path().native() };
             }
 
             NewTerminalArgs args;
-            args.StartingDirectory(winrt::hstring{ path.wstring() });
-            this->_OpenNewTerminalViaDropdown(args);
-
-            TraceLoggingWrite(
-                g_hTerminalAppProvider,
-                "NewTabByDragDrop",
-                TraceLoggingDescription("Event emitted when the user drag&drops onto the new tab button"),
-                TraceLoggingKeyword(MICROSOFT_KEYWORD_MEASURES),
-                TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
+            args.StartingDirectory(directory);
+            _OpenNewTerminalViaDropdown(args);
         }
     }
+    CATCH_LOG()
 
     // Method Description:
     // - This method is called once command palette action was chosen for dispatching
@@ -550,27 +557,28 @@ namespace winrt::TerminalApp::implementation
         // Handle it on a subsequent pass of the UI thread.
         co_await wil::resume_foreground(Dispatcher(), CoreDispatcherPriority::Normal);
 
-        // If the caller provided a CWD, switch to that directory, then switch
+        // If the caller provided a CWD, "switch" to that directory, then switch
         // back once we're done. This looks weird though, because we have to set
         // up the scope_exit _first_. We'll release the scope_exit if we don't
         // actually need it.
-        auto originalCwd{ wil::GetCurrentDirectoryW<std::wstring>() };
-        auto restoreCwd = wil::scope_exit([&originalCwd]() {
+
+        auto originalVirtualCwd{ _WindowProperties.VirtualWorkingDirectory() };
+        auto restoreCwd = wil::scope_exit([&originalVirtualCwd, this]() {
             // ignore errors, we'll just power on through. We'd rather do
             // something rather than fail silently if the directory doesn't
             // actually exist.
-            LOG_IF_WIN32_BOOL_FALSE(SetCurrentDirectory(originalCwd.c_str()));
+            _WindowProperties.VirtualWorkingDirectory(originalVirtualCwd);
         });
+
         if (cwd.empty())
         {
+            // We didn't actually need to change the virtual CWD, so we don't
+            // need to restore it
             restoreCwd.release();
         }
         else
         {
-            // ignore errors, we'll just power on through. We'd rather do
-            // something rather than fail silently if the directory doesn't
-            // actually exist.
-            LOG_IF_WIN32_BOOL_FALSE(SetCurrentDirectory(cwd.c_str()));
+            _WindowProperties.VirtualWorkingDirectory(cwd);
         }
 
         if (auto page{ weakThis.get() })
@@ -850,7 +858,10 @@ namespace winrt::TerminalApp::implementation
         });
         // Necessary for fly-out sub items to get focus on a tab before collapsing. Related to #15049
         newTabFlyout.Closing([this](auto&&, auto&&) {
-            _FocusCurrentTab(true);
+            if (!_commandPaletteIs(Visibility::Visible))
+            {
+                _FocusCurrentTab(true);
+            }
         });
         _newTabButton.Flyout(newTabFlyout);
     }
@@ -1112,6 +1123,7 @@ namespace winrt::TerminalApp::implementation
                 if (profile)
                 {
                     newTerminalArgs.Profile(::Microsoft::Console::Utils::GuidToString(profile.Guid()));
+                    newTerminalArgs.StartingDirectory(_evaluatePathForCwd(profile.EvaluatedStartingDirectory()));
                 }
             }
 
@@ -1157,6 +1169,11 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    std::wstring TerminalPage::_evaluatePathForCwd(const std::wstring_view path)
+    {
+        return Utils::EvaluateStartingDirectory(_WindowProperties.VirtualWorkingDirectory(), path);
+    }
+
     // Method Description:
     // - Creates a new connection based on the profile settings
     // Arguments:
@@ -1187,7 +1204,7 @@ namespace winrt::TerminalApp::implementation
                 connection = TerminalConnection::ConptyConnection{};
             }
 
-            auto valueSet = TerminalConnection::ConptyConnection::CreateSettings(azBridgePath.wstring(),
+            auto valueSet = TerminalConnection::ConptyConnection::CreateSettings(azBridgePath.native(),
                                                                                  L".",
                                                                                  L"Azure",
                                                                                  nullptr,
@@ -1225,16 +1242,7 @@ namespace winrt::TerminalApp::implementation
             // construction, because the connection might not spawn the child
             // process until later, on another thread, after we've already
             // restored the CWD to its original value.
-            auto newWorkingDirectory{ settings.StartingDirectory() };
-            if (newWorkingDirectory.size() == 0 || newWorkingDirectory.size() == 1 &&
-                                                       !(newWorkingDirectory[0] == L'~' || newWorkingDirectory[0] == L'/'))
-            { // We only want to resolve the new WD against the CWD if it doesn't look like a Linux path (see GH#592)
-                auto cwdString{ wil::GetCurrentDirectoryW<std::wstring>() };
-                std::filesystem::path cwd{ cwdString };
-                cwd /= settings.StartingDirectory().c_str();
-                newWorkingDirectory = winrt::hstring{ cwd.wstring() };
-            }
-
+            auto newWorkingDirectory{ _evaluatePathForCwd(settings.StartingDirectory()) };
             auto conhostConn = TerminalConnection::ConptyConnection();
             auto valueSet = TerminalConnection::ConptyConnection::CreateSettings(settings.Commandline(),
                                                                                  newWorkingDirectory,
@@ -1443,9 +1451,10 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        if (const auto p = CommandPaletteElement(); p && p.Visibility() == Visibility::Visible && cmd.ActionAndArgs().Action() != ShortcutAction::ToggleCommandPalette)
+        if (_commandPaletteIs(Visibility::Visible) &&
+            cmd.ActionAndArgs().Action() != ShortcutAction::ToggleCommandPalette)
         {
-            p.Visibility(Visibility::Collapsed);
+            CommandPaletteElement().Visibility(Visibility::Collapsed);
         }
 
         // Let's assume the user has bound the dead key "^" to a sendInput command that sends "b".
@@ -1777,6 +1786,11 @@ namespace winrt::TerminalApp::implementation
 
         return _loadCommandPaletteSlowPath();
     }
+    bool TerminalPage::_commandPaletteIs(WUX::Visibility visibility)
+    {
+        const auto p = CommandPaletteElement();
+        return p && p.Visibility() == visibility;
+    }
 
     CommandPalette TerminalPage::_loadCommandPaletteSlowPath()
     {
@@ -1788,7 +1802,7 @@ namespace winrt::TerminalApp::implementation
         // When the visibility of the command palette changes to "collapsed",
         // the palette has been closed. Toss focus back to the currently active control.
         p.RegisterPropertyChangedCallback(UIElement::VisibilityProperty(), [this](auto&&, auto&&) {
-            if (CommandPaletteElement().Visibility() == Visibility::Collapsed)
+            if (_commandPaletteIs(Visibility::Collapsed))
             {
                 _FocusActiveControl(nullptr, nullptr);
             }
@@ -2076,6 +2090,13 @@ namespace winrt::TerminalApp::implementation
         const auto windowId{ args.Window() };
         if (!windowId.empty())
         {
+            // if the windowId is the same as our name, do nothing
+            if (windowId == WindowProperties().WindowName() ||
+                windowId == winrt::to_hstring(WindowProperties().WindowId()))
+            {
+                return true;
+            }
+
             if (const auto terminalTab{ _GetFocusedTabImpl() })
             {
                 auto startupActions = terminalTab->BuildStartupActions(true);
@@ -2755,9 +2776,8 @@ namespace winrt::TerminalApp::implementation
     // Arguments:
     // - sender (not used)
     // - args: the arguments specifying how to set the display status to ShowWindow for our window handle
-    winrt::fire_and_forget TerminalPage::_ShowWindowChangedHandler(const IInspectable /*sender*/, const Microsoft::Terminal::Control::ShowWindowArgs args)
+    void TerminalPage::_ShowWindowChangedHandler(const IInspectable& /*sender*/, const Microsoft::Terminal::Control::ShowWindowArgs args)
     {
-        co_await resume_foreground(Dispatcher());
         _ShowWindowChangedHandlers(*this, args);
     }
 
@@ -4235,6 +4255,9 @@ namespace winrt::TerminalApp::implementation
             // whatever the default profile's GUID is.
 
             newTerminalArgs.Profile(::Microsoft::Console::Utils::GuidToString(profile.Guid()));
+
+            newTerminalArgs.StartingDirectory(_evaluatePathForCwd(controlSettings.DefaultSettings().StartingDirectory()));
+
             _OpenElevatedWT(newTerminalArgs);
             return true;
         }
@@ -4736,8 +4759,6 @@ namespace winrt::TerminalApp::implementation
         co_await wil::resume_foreground(Dispatcher());
         if (const auto& page{ weakThis.get() })
         {
-            // `this` is safe to use
-            //
             // First we need to get the position in the List to drop to
             auto index = -1;
 
@@ -4757,8 +4778,8 @@ namespace winrt::TerminalApp::implementation
                 }
             }
 
-            const auto myId{ _WindowProperties.WindowId() };
-            const auto request = winrt::make_self<RequestReceiveContentArgs>(src, myId, index);
+            // `this` is safe to use
+            const auto request = winrt::make_self<RequestReceiveContentArgs>(src, _WindowProperties.WindowId(), index);
 
             // This will go up to the monarch, who will then dispatch the request
             // back down to the source TerminalPage, who will then perform a

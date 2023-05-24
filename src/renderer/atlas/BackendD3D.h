@@ -151,6 +151,9 @@ namespace Microsoft::Console::Render::Atlas
             LineRendition lineRendition = LineRendition::SingleWidth;
 
             til::linear_flat_set<AtlasGlyphEntry> glyphs;
+            // boxGlyphs gets an increased growth rate of 2^2 = 4x, because presumably fonts either contain very
+            // few or almost all of the box glyphs. This reduces the cost of _initializeFontFaceEntry quite a bit.
+            til::linear_flat_set<u16, 2, 2> boxGlyphs;
         };
 
         struct AtlasFontFaceEntry
@@ -214,14 +217,15 @@ namespace Microsoft::Console::Render::Atlas
         void _uploadBackgroundBitmap(const RenderingPayload& p);
         void _drawText(RenderingPayload& p);
         ATLAS_ATTR_COLD void _drawTextOverlapSplit(const RenderingPayload& p, u16 y);
+        ATLAS_ATTR_COLD static void _initializeFontFaceEntry(AtlasFontFaceEntryInner& fontFaceEntry);
         ATLAS_ATTR_COLD [[nodiscard]] bool _drawGlyph(const RenderingPayload& p, const AtlasFontFaceEntryInner& fontFaceEntry, AtlasGlyphEntry& glyphEntry);
         bool _drawSoftFontGlyph(const RenderingPayload& p, const AtlasFontFaceEntryInner& fontFaceEntry, AtlasGlyphEntry& glyphEntry);
         void _drawGlyphPrepareRetry(const RenderingPayload& p);
         void _splitDoubleHeightGlyph(const RenderingPayload& p, const AtlasFontFaceEntryInner& fontFaceEntry, AtlasGlyphEntry& glyphEntry);
         void _drawGridlines(const RenderingPayload& p, u16 y);
         void _drawCursorBackground(const RenderingPayload& p);
-        ATLAS_ATTR_COLD void _drawCursorForeground(const RenderingPayload& p);
-        ATLAS_ATTR_COLD size_t _drawCursorForegroundSlowPath(const RenderingPayload& p, const CursorRect& c, size_t offset);
+        ATLAS_ATTR_COLD void _drawCursorForeground();
+        ATLAS_ATTR_COLD size_t _drawCursorForegroundSlowPath(const CursorRect& c, size_t offset);
         void _drawSelection(const RenderingPayload& p);
         void _executeCustomShader(RenderingPayload& p);
 

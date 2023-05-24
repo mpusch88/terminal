@@ -180,7 +180,6 @@ void Terminal::UpdateAppearance(const ICoreAppearance& appearance)
     {
         _renderSettings.SetColorTableEntry(i, til::color{ appearance.GetColorTableEntry(i) });
     }
-    _renderSettings.MakeAdjustedColorArray();
 
     auto cursorShape = CursorType::VerticalBar;
     switch (appearance.CursorShape())
@@ -236,7 +235,7 @@ void Terminal::EraseScrollback()
 
 bool Terminal::IsXtermBracketedPasteModeEnabled() const noexcept
 {
-    return _bracketedPasteMode;
+    return _systemMode.test(Mode::BracketedPaste);
 }
 
 std::wstring_view Terminal::GetWorkingDirectory() noexcept
@@ -1324,8 +1323,6 @@ void Terminal::ApplyScheme(const Scheme& colorScheme)
     _renderSettings.SetColorTableEntry(TextColor::BRIGHT_WHITE, til::color{ colorScheme.BrightWhite });
 
     _renderSettings.SetColorTableEntry(TextColor::CURSOR_COLOR, til::color{ colorScheme.CursorColor });
-
-    _renderSettings.MakeAdjustedColorArray();
 
     // Tell the control that the scrollbar has somehow changed. Used as a
     // workaround to force the control to redraw any scrollbar marks whose color

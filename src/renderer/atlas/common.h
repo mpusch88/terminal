@@ -429,7 +429,7 @@ namespace Microsoft::Console::Render::Atlas
 
     struct ShapedRow
     {
-        void clear(u16 y, u16 cellHeight) noexcept
+        void Clear(u16 y, u16 cellHeight) noexcept
         {
             mappings.clear();
             glyphIndices.clear();
@@ -553,5 +553,4 @@ namespace Microsoft::Console::Render::Atlas
         virtual void Render(RenderingPayload& payload) = 0;
         virtual bool RequiresContinuousRedraw() noexcept = 0;
     };
-
 }
